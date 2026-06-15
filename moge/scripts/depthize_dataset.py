@@ -27,11 +27,18 @@ vis = False
 
 # Frames processed per GPU forward pass. Increase until VRAM is ~full
 # (you have ~11 GB of headroom at the current single-frame usage).
-BATCH_SIZE = 1
+BATCH_SIZE = 8
 # Parallel CPU workers that decode video frames ahead of the GPU. This is the
 # real bottleneck here: video decode is sequential CPU work that the GPU waits
 # on. Set to ~number of physical cores; 0 disables (single-process decoding).
-NUM_WORKERS = 0
+NUM_WORKERS = 8
+
+# Number of base ViT tokens per frame. This is the dominant speed knob for the
+# ViT-L backbone (attention cost grows with token count). The model's range is
+# [1200, 3600]; the default resolution_level=9 uses the max (3600), which is
+# above the docstring's suggested 1200-2500. Lowering this is the cheapest real
+# speedup, trading fine depth detail for throughput. Tune for your quality bar.
+NUM_TOKENS = 1800
 
 device = torch.device("cuda")
 
@@ -84,7 +91,7 @@ for ep_idx in ep_bar:
     for batch_frames in batch_bar:
         rgb = torch.stack([f[rgb_key] for f in batch_frames]).to(device)  # (B, C, H, W) float32 in [0, 1]
         with torch.inference_mode():
-            output = model.infer(rgb)
+            output = model.infer(rgb, num_tokens=NUM_TOKENS)
         depths.extend(output["depth"].cpu().numpy())   # B x (H, W) metric scale
         episode_frames.extend(batch_frames)
 
