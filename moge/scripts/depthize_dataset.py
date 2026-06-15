@@ -1,7 +1,14 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
+
+# DataLoader workers pass decoded frames to the main process via /dev/shm by
+# default, which is tiny in most containers and overflows ("unable to allocate
+# shared memory"). The file_system strategy uses regular temp files instead.
+mp.set_sharing_strategy("file_system")
 from huggingface_hub import login
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import DEFAULT_FEATURES
@@ -18,11 +25,19 @@ DEPTH_KEY = "observation.images.egocentric_depth"
 
 vis = False
 
+# Frames processed per GPU forward pass. Increase until VRAM is ~full
+# (you have ~11 GB of headroom at the current single-frame usage).
+BATCH_SIZE = 1
+# Parallel CPU workers that decode video frames ahead of the GPU. This is the
+# real bottleneck here: video decode is sequential CPU work that the GPU waits
+# on. Set to ~number of physical cores; 0 disables (single-process decoding).
+NUM_WORKERS = 0
+
 device = torch.device("cuda")
 
 model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl").to(device)
 
-# ── Load source dataset ────────────────────────────────────────────────────────
+# Load source dataset 
 source = LeRobotDataset(SOURCE_REPO_ID)
 
 print(f"Source dataset: {len(source)} frames, {source.num_episodes} episodes")
@@ -31,7 +46,7 @@ image_keys = [k for k in source.features if "image" in k.lower()]
 rgb_key = next(k for k in image_keys if k != DEPTH_KEY)
 print(f"RGB key: {rgb_key}  |  Depth key to replace: {DEPTH_KEY}")
 
-# ── Create target dataset (same features, depth key will hold MoGe estimates) ─
+# Create target dataset (same features, depth key will hold MoGe estimates)
 user_features = {k: v for k, v in source.features.items() if k not in DEFAULT_FEATURES}
 target = LeRobotDataset.create(
     repo_id=TARGET_REPO_ID,
@@ -39,22 +54,39 @@ target = LeRobotDataset.create(
     features=user_features,
 )
 
-# ── Iterate episode by episode ─────────────────────────────────────────────────
+# Iterate episode by episode
 ep_bar = tqdm(range(source.num_episodes), desc="Episodes", unit="ep")
 for ep_idx in ep_bar:
     from_idx = source.meta.episodes["dataset_from_index"][ep_idx]
     to_idx = source.meta.episodes["dataset_to_index"][ep_idx]
 
-    episode_frames = [source[i] for i in range(from_idx, to_idx + 1)]
-    n_frames = len(episode_frames)
+    indices = list(range(from_idx, to_idx + 1))
+    n_frames = len(indices)
 
-    # Run MoGe inference on every frame and collect raw depths
+    # Decode frames in parallel worker processes and prefetch the next batches
+    # while the GPU is busy. collate_fn keeps each batch as a list of frame
+    # dicts (no stacking) so the save loop below works unchanged; order is
+    # preserved because shuffle=False.
+    loader = DataLoader(
+        Subset(source, indices),
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        shuffle=False,
+        collate_fn=lambda batch: batch,
+        pin_memory=True,
+        persistent_workers=False,
+    )
+
+    # Run MoGe inference in batches and collect raw depths + frames
+    episode_frames = []
     depths = []
-    frame_bar = tqdm(episode_frames, desc=f"  Ep {ep_idx:>3} frames", unit="fr", leave=False)
-    for frame in frame_bar:
-        rgb = frame[rgb_key].to(device)          # (C, H, W) float32 in [0, 1]
-        output = model.infer(rgb)
-        depths.append(output["depth"].cpu().numpy())   # (H, W) metric scale
+    batch_bar = tqdm(loader, desc=f"  Ep {ep_idx:>3} batches", unit="batch", leave=False)
+    for batch_frames in batch_bar:
+        rgb = torch.stack([f[rgb_key] for f in batch_frames]).to(device)  # (B, C, H, W) float32 in [0, 1]
+        with torch.inference_mode():
+            output = model.infer(rgb)
+        depths.extend(output["depth"].cpu().numpy())   # B x (H, W) metric scale
+        episode_frames.extend(batch_frames)
 
     # Normalise per episode to preserve relative depth across frames
     ep_min = min(d.min() for d in depths)
@@ -94,7 +126,7 @@ for ep_idx in ep_bar:
     target.save_episode()
     print(f"Episode {ep_idx + 1}/{source.num_episodes} saved.")
 
-# ── Finalise and push ──────────────────────────────────────────────────────────
+# Finalise and push
 target.consolidate()
-#target.push_to_hub(private=True)
+target.push_to_hub(private=True)
 print(f"Done. Dataset pushed to {TARGET_REPO_ID}")
