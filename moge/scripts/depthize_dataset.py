@@ -18,11 +18,18 @@ DEPTH_KEY = "observation.images.egocentric_depth"
 
 vis = False
 
+# Number of base ViT tokens per frame. This is the dominant speed knob for the
+# ViT-L backbone (attention cost grows with token count). The model's range is
+# [1200, 3600]; the default resolution_level=9 uses the max (3600), which is
+# above the docstring's suggested 1200-2500. Lowering this is the cheapest real
+# speedup, trading fine depth detail for throughput. Tune for your quality bar.
+NUM_TOKENS = 1800
+
 device = torch.device("cuda")
 
 model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl").to(device)
 
-# ── Load source dataset ────────────────────────────────────────────────────────
+# Load source dataset
 source = LeRobotDataset(SOURCE_REPO_ID)
 
 print(f"Source dataset: {len(source)} frames, {source.num_episodes} episodes")
@@ -31,7 +38,7 @@ image_keys = [k for k in source.features if "image" in k.lower()]
 rgb_key = next(k for k in image_keys if k != DEPTH_KEY)
 print(f"RGB key: {rgb_key}  |  Depth key to replace: {DEPTH_KEY}")
 
-# ── Create target dataset (same features, depth key will hold MoGe estimates) ─
+# Create target dataset (same features, depth key will hold MoGe estimates)
 user_features = {k: v for k, v in source.features.items() if k not in DEFAULT_FEATURES}
 target = LeRobotDataset.create(
     repo_id=TARGET_REPO_ID,
@@ -39,13 +46,13 @@ target = LeRobotDataset.create(
     features=user_features,
 )
 
-# ── Iterate episode by episode ─────────────────────────────────────────────────
+# Iterate episode by episode
 ep_bar = tqdm(range(source.num_episodes), desc="Episodes", unit="ep")
 for ep_idx in ep_bar:
     from_idx = source.meta.episodes["dataset_from_index"][ep_idx]
     to_idx = source.meta.episodes["dataset_to_index"][ep_idx]
 
-    episode_frames = [source[i] for i in range(from_idx, to_idx + 1)]
+    episode_frames = [source[i] for i in range(from_idx, to_idx)]
     n_frames = len(episode_frames)
 
     # Run MoGe inference on every frame and collect raw depths
@@ -53,7 +60,8 @@ for ep_idx in ep_bar:
     frame_bar = tqdm(episode_frames, desc=f"  Ep {ep_idx:>3} frames", unit="fr", leave=False)
     for frame in frame_bar:
         rgb = frame[rgb_key].to(device)          # (C, H, W) float32 in [0, 1]
-        output = model.infer(rgb)
+        with torch.inference_mode():
+            output = model.infer(rgb, num_tokens=NUM_TOKENS)
         depths.append(output["depth"].cpu().numpy())   # (H, W) metric scale
 
     # Normalise per episode to preserve relative depth across frames
@@ -94,7 +102,7 @@ for ep_idx in ep_bar:
     target.save_episode()
     print(f"Episode {ep_idx + 1}/{source.num_episodes} saved.")
 
-# ── Finalise and push ──────────────────────────────────────────────────────────
+# Finalise and push
 target.consolidate()
-#target.push_to_hub(private=True)
+target.push_to_hub(private=True)
 print(f"Done. Dataset pushed to {TARGET_REPO_ID}")
