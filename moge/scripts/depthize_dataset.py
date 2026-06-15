@@ -40,6 +40,11 @@ NUM_WORKERS = 8
 # speedup, trading fine depth detail for throughput. Tune for your quality bar.
 NUM_TOKENS = 1800
 
+# Fixed metric depth scale (metres). Depth is clipped to [0, MAX_DEPTH_M] and
+# mapped linearly to 0-255, so byte values mean the same thing across every
+# episode. Pixels beyond MAX_DEPTH_M saturate at 255.
+MAX_DEPTH_M = 8.0
+
 device = torch.device("cuda")
 
 model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl").to(device)
@@ -96,13 +101,12 @@ for ep_idx in ep_bar:
         depths.extend(output["depth"].cpu().numpy())   # B x (H, W) metric scale
         episode_frames.extend(batch_frames)
 
-    # Normalise per episode to preserve relative depth across frames
-    ep_min = min(d.min() for d in depths)
-    ep_max = max(d.max() for d in depths)
-    depth_range = ep_max - ep_min if ep_max > ep_min else 1.0
-
     for frame, depth in zip(episode_frames, depths):
-        depth_u8 = ((depth - ep_min) / depth_range * 255).astype(np.uint8)  # (H, W)
+        # Fixed metric scale: [0, MAX_DEPTH_M] m -> [0, 255]. MoGe sets masked/
+        # invalid pixels to +inf (apply_mask=True); clip maps those to MAX_DEPTH_M
+        # (255), same as anything farther than the cap.
+        norm = np.clip(depth / MAX_DEPTH_M, 0.0, 1.0)               # invalid (+inf) → 1.0
+        depth_u8 = (norm * 255).astype(np.uint8)                    # (H, W)
         depth_rgb = np.stack([depth_u8, depth_u8, depth_u8], axis=-1)       # (H, W, 3)
 
         if vis:
@@ -135,6 +139,6 @@ for ep_idx in ep_bar:
     print(f"Episode {ep_idx + 1}/{source.num_episodes} saved.")
 
 # Finalise and push
-target.consolidate()
+target.finalize()
 target.push_to_hub(private=True)
 print(f"Done. Dataset pushed to {TARGET_REPO_ID}")
