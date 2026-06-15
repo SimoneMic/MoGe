@@ -67,7 +67,8 @@ for ep_idx in ep_bar:
     from_idx = source.meta.episodes["dataset_from_index"][ep_idx]
     to_idx = source.meta.episodes["dataset_to_index"][ep_idx]
 
-    indices = list(range(from_idx, to_idx + 1))
+    # dataset_to_index is exclusive (Python-slice convention), so no +1.
+    indices = list(range(from_idx, to_idx))
     n_frames = len(indices)
 
     # Decode frames in parallel worker processes and prefetch the next batches
