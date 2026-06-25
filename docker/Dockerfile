@@ -93,12 +93,22 @@ RUN sudo apt-get install -y build-essential cmake-curses-gui \
     gstreamer1.0-libav \
     swig
 RUN git clone https://github.com/robotology/ycm-cmake-modules && cd ycm-cmake-modules && mkdir build && cd build && cmake .. && sudo make install -j8
-RUN sudo apt install -y libace-dev gdb &&\
-    git clone https://github.com/robotology/yarp && cd yarp && git switch yarp-3.12 && mkdir build && cd build && cmake -DYARP_COMPILE_BINDINGS=ON .. && sudo make install -j12
+COPY ./fix_swig_yarp.sh /home/${USER}/
+RUN sudo apt install -y libace-dev gdb unzip
+RUN bash /home/${USER}/fix_swig_yarp.sh  &&\
+    git clone https://github.com/robotology/yarp && \
+    cd yarp && git switch yarp-3.12 && mkdir build &&\
+    cd build && \
+    cmake -DYARP_COMPILE_BINDINGS=ON \
+    -DCREATE_PYTHON=ON \
+    -DSWIG_EXECUTABLE=/usr/bin/swig \
+    -DSWIG_DIR=/usr/share/swig/4.3.0 \
+    -DENABLE_yarpcar_mjpeg=ON \
+    .. && sudo make install -j12
+ENV YARP_COLORED_OUTPUT=1
+ENV YARP_DATA_DIRS=/usr/local/share/yarp
 RUN sudo ln -s /usr/local/share/bash-completion/completions/yarp /usr/share/bash-completion/completions && \
     sudo apt install -y glpk-doc glpk-utils libglpk-dev libglpk40
-ENV YARP_COLORED_OUTPUT=1
-ENV YARP_DATA_DIRS=/usr/local
 
 # Yarp devices ros2
 RUN git clone https://github.com/robotology/yarp-devices-ros2 && \
@@ -106,13 +116,15 @@ RUN git clone https://github.com/robotology/yarp-devices-ros2 && \
     git checkout v2.0.0 && \
     source /opt/ros/$ROS_DISTRO/setup.sh && colcon build && \
     cd .. && mkdir build && cd build && \
-    source /opt/ros/$ROS_DISTRO/setup.bash && source /home/$USER/yarp-devices-ros2/ros2_interfaces_ws/install/setup.bash && cmake .. -DYARP_ROS2_USE_SYSTEM_map2d_nws_ros2_msgs=ON -DYARP_ROS2_USE_SYSTEM_yarp_control_msgs=ON && make -j8 && \
+    source /opt/ros/$ROS_DISTRO/setup.bash && source /home/$USER/yarp-devices-ros2/ros2_interfaces_ws/install/setup.bash &&\
+    cmake -DYARP_ROS2_USE_SYSTEM_map2d_nws_ros2_msgs=ON \
+    -DYARP_ROS2_USE_SYSTEM_yarp_control_msgs=ON \
+    .. && make -j8 && \
     echo "source /home/$USER/yarp-devices-ros2/ros2_interfaces_ws/install/local_setup.bash" >> ~/.bashrc
 ENV YARP_DATA_DIRS=${YARP_DATA_DIRS}:/home/$USER/yarp-devices-ros2/build/share/yarp:/home/$USER/yarp-devices-ros2/build/share/yarp-devices-ros2
 
 ### Lerobot install
 RUN sudo apt update && sudo apt install python3-venv python3-pip -y
-RUN pip install gradio trimesh --break-system-packages
 RUN git clone https://${GIT_TOKEN}@github.com/hsp-iit/lerobot && \
     cd lerobot && pip install -e '.[dataset]' --break-system-packages
 
@@ -121,5 +133,6 @@ RUN git clone https://github.com/SimoneMic/MoGe && \
     cd MoGe && pip install -r requirements.txt --break-system-packages &&\
     pip install -e . --break-system-packages
 ENV PATH=$PATH:/home/$USER/.local/bin
+
 # Cleanup
 RUN sudo apt update && sudo apt install -y iproute2 unzip terminator bash-completion locate
