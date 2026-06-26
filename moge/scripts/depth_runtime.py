@@ -1,18 +1,17 @@
 import faulthandler
 faulthandler.enable()
 import yarp
-from yarp import BufferedPortImageRgb, BufferedPortImageMono, ImageRgb, ImageMono, ImageRgbCallback, Log
+from yarp import BufferedPortImageRgb, BufferedPortImageMono, ImageRgb, ImageMono, ImageRgbCallback, Stamp
 import numpy as np
 import torch
 from moge.model.v2 import MoGeModel
 from threading import Lock
 
-log = Log()
-
 class ImageCallback(ImageRgbCallback):
     def __init__(self, max_depth : float = 8.0):
         super().__init__()
         self.is_initialized = False
+        self.rgb_port = None          # set from main() before useCallback
         self.depth_port = BufferedPortImageMono()
         self.depth_port.open("/moGe/depth:o")
         self.mutex = Lock()
@@ -20,7 +19,7 @@ class ImageCallback(ImageRgbCallback):
 
     def onRead(self, img: ImageRgb, reader=None):
         if not self.is_initialized:
-            log.error("Module not initialized: call init() before enabling the port!")
+            print("Module not initialized: call init() before enabling the port!")
             return
         with self.mutex:
             try:
@@ -34,9 +33,13 @@ class ImageCallback(ImageRgbCallback):
                 depth_img = self._numpy_to_yarp_mono(depth_u8)
                 out = self.depth_port.prepare()
                 out.copy(depth_img)
+                # Propagate the incoming RGB image's timestamp to the depth output.
+                stamp = Stamp()
+                if self.rgb_port is not None and self.rgb_port.getEnvelope(stamp):
+                    self.depth_port.setEnvelope(stamp)
                 self.depth_port.write()
             except Exception as ex:
-                log.error(f"Got exception: {ex}")
+                print(f"Got exception: {ex}")
 
     @staticmethod
     def _yarp_rgb_to_numpy(img: ImageRgb) -> np.ndarray:
@@ -45,8 +48,8 @@ class ImageCallback(ImageRgbCallback):
         arr = np.zeros((h, w, 3), dtype=np.uint8)
         wrapper = ImageRgb()
         wrapper.resize(w, h)
-        # Pass arr.data (a memoryview): this selects yarp's PyObject* setExternal
-        # overload. Passing the bare ndarray matches the void* overload, which
+        # Pass arr.data (a memoryview): this selects yarp's PyObject* setExternal overload.
+        # Passing the bare ndarray matches the void* overload, which
         # treats the object pointer as a raw address and segfaults.
         wrapper.setExternal(arr.data, w, h)  # wrapper's pixel buffer now points at arr's memory
         wrapper.copy(img)                     # copies img's pixels into arr via the wrapper
@@ -66,7 +69,8 @@ class ImageCallback(ImageRgbCallback):
     def init(self, device: str = "cuda"):
         self.device = torch.device(device)
         self.moge = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl").to(self.device)
-        # The model range is [1200, 3600]. The default resolution_level=9 uses the max (3600) number of tokens. More the tokens, more accurate and slower is the model
+        # The model range is [1200, 3600]. The default resolution_level=9 uses the max (3600) number of tokens. 
+        # More the tokens, more accurate and slower is the model
         self.token_number = 3000
         self.is_initialized = True
 
@@ -78,6 +82,8 @@ def main():
     rgb_port = BufferedPortImageRgb()
     callback = ImageCallback()
     callback.init()
+    # give to the callback the port handle for getEnvelope
+    callback.rgb_port = rgb_port
     rgb_port.useCallback(callback)
     rgb_port.open("/moGe/rgb:i")
 
