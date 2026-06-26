@@ -1,7 +1,14 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
+
+# DataLoader workers pass decoded frames to the main process via /dev/shm by
+# default, which is tiny in most containers and overflows ("unable to allocate
+# shared memory"). The file_system strategy uses regular temp files instead.
+mp.set_sharing_strategy("file_system")
 from huggingface_hub import login
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import DEFAULT_FEATURES
@@ -18,12 +25,25 @@ DEPTH_KEY = "observation.images.egocentric_depth"
 
 vis = False
 
+# Frames processed per GPU forward pass. Increase until VRAM is ~full
+# (you have ~11 GB of headroom at the current single-frame usage).
+BATCH_SIZE = 8
+# Parallel CPU workers that decode video frames ahead of the GPU. This is the
+# real bottleneck here: video decode is sequential CPU work that the GPU waits
+# on. Set to ~number of physical cores; 0 disables (single-process decoding).
+NUM_WORKERS = 8
+
 # Number of base ViT tokens per frame. This is the dominant speed knob for the
 # ViT-L backbone (attention cost grows with token count). The model's range is
 # [1200, 3600]; the default resolution_level=9 uses the max (3600), which is
 # above the docstring's suggested 1200-2500. Lowering this is the cheapest real
 # speedup, trading fine depth detail for throughput. Tune for your quality bar.
 NUM_TOKENS = 1800
+
+# Fixed metric depth scale (metres). Depth is clipped to [0, MAX_DEPTH_M] and
+# mapped linearly to 0-255, so byte values mean the same thing across every
+# episode. Pixels beyond MAX_DEPTH_M saturate at 255.
+MAX_DEPTH_M = 8.0
 
 device = torch.device("cuda")
 
@@ -52,25 +72,41 @@ for ep_idx in ep_bar:
     from_idx = source.meta.episodes["dataset_from_index"][ep_idx]
     to_idx = source.meta.episodes["dataset_to_index"][ep_idx]
 
-    episode_frames = [source[i] for i in range(from_idx, to_idx)]
-    n_frames = len(episode_frames)
+    # dataset_to_index is exclusive (Python-slice convention), so no +1.
+    indices = list(range(from_idx, to_idx))
+    n_frames = len(indices)
 
-    # Run MoGe inference on every frame and collect raw depths
+    # Decode frames in parallel worker processes and prefetch the next batches
+    # while the GPU is busy. collate_fn keeps each batch as a list of frame
+    # dicts (no stacking) so the save loop below works unchanged; order is
+    # preserved because shuffle=False.
+    loader = DataLoader(
+        Subset(source, indices),
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        shuffle=False,
+        collate_fn=lambda batch: batch,
+        pin_memory=True,
+        persistent_workers=False,
+    )
+
+    # Run MoGe inference in batches and collect raw depths + frames
+    episode_frames = []
     depths = []
-    frame_bar = tqdm(episode_frames, desc=f"  Ep {ep_idx:>3} frames", unit="fr", leave=False)
-    for frame in frame_bar:
-        rgb = frame[rgb_key].to(device)          # (C, H, W) float32 in [0, 1]
+    batch_bar = tqdm(loader, desc=f"  Ep {ep_idx:>3} batches", unit="batch", leave=False)
+    for batch_frames in batch_bar:
+        rgb = torch.stack([f[rgb_key] for f in batch_frames]).to(device)  # (B, C, H, W) float32 in [0, 1]
         with torch.inference_mode():
             output = model.infer(rgb, num_tokens=NUM_TOKENS)
-        depths.append(output["depth"].cpu().numpy())   # (H, W) metric scale
-
-    # Normalise per episode to preserve relative depth across frames
-    ep_min = min(d.min() for d in depths)
-    ep_max = max(d.max() for d in depths)
-    depth_range = ep_max - ep_min if ep_max > ep_min else 1.0
+        depths.extend(output["depth"].cpu().numpy())   # B x (H, W) metric scale
+        episode_frames.extend(batch_frames)
 
     for frame, depth in zip(episode_frames, depths):
-        depth_u8 = ((depth - ep_min) / depth_range * 255).astype(np.uint8)  # (H, W)
+        # Fixed metric scale: [0, MAX_DEPTH_M] m -> [0, 255]. MoGe sets masked/
+        # invalid pixels to +inf (apply_mask=True); clip maps those to MAX_DEPTH_M
+        # (255), same as anything farther than the cap.
+        norm = np.clip(depth / MAX_DEPTH_M, 0.0, 1.0)               # invalid (+inf) → 1.0
+        depth_u8 = (norm * 255).astype(np.uint8)                    # (H, W)
         depth_rgb = np.stack([depth_u8, depth_u8, depth_u8], axis=-1)       # (H, W, 3)
 
         if vis:
@@ -103,6 +139,6 @@ for ep_idx in ep_bar:
     print(f"Episode {ep_idx + 1}/{source.num_episodes} saved.")
 
 # Finalise and push
-target.consolidate()
+target.finalize()
 target.push_to_hub(private=True)
 print(f"Done. Dataset pushed to {TARGET_REPO_ID}")
