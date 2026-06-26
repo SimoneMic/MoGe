@@ -2,6 +2,9 @@
 
 MoGe is a powerful model for recovering 3D geometry from monocular open-domain images, including metric point maps, metric depth maps, normal maps and camera FOV. ***Check our websites ([MoGe-1](https://wangrc.site/MoGePage), [MoGe-2](https://wangrc.site/MoGe2Page)) for videos and interactive results!***
 
+## Runtime Instructions with YARP
+In `moge/scripts/Readme.md` you can find the instructions on how to convert an RGB lerobot dataset with depth and how to have a YARP module that converts an RGB image to depth using MoGe.
+
 ## 📖 Publications
 
 ### MoGe-2: Accurate Monocular Geometry with Metric Scale and Sharp Details
@@ -50,7 +53,7 @@ https://github.com/user-attachments/assets/8f9ae680-659d-4f7f-82e2-b9ed9d6b988a
 ## 📦 Installation
 
 ### Install via pip
-  
+
 ```bash
 pip install git+https://github.com/microsoft/MoGe.git
 ```
@@ -123,9 +126,9 @@ If loading a local checkpoint, replace the model name with the local path.
 
 For ONNX support, please refer to [docs/onnx.md](docs/onnx.md).
 
-## 💡 Minimal Code Example 
+## 💡 Minimal Code Example
 
-Here is a minimal example for loading the model and inferring on a single image. 
+Here is a minimal example for loading the model and inferring on a single image.
 
 ```python
 import cv2
@@ -136,22 +139,22 @@ from moge.model.v2 import MoGeModel # Let's try MoGe-2
 device = torch.device("cuda")
 
 # Load the model from huggingface hub (or load from local).
-model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device)                             
+model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device)
 
 # Read the input image and convert to tensor (3, H, W) with RGB values normalized to [0, 1]
-input_image = cv2.cvtColor(cv2.imread("PATH_TO_IMAGE.jpg"), cv2.COLOR_BGR2RGB)                       
-input_image = torch.tensor(input_image / 255, dtype=torch.float32, device=device).permute(2, 0, 1)    
+input_image = cv2.cvtColor(cv2.imread("PATH_TO_IMAGE.jpg"), cv2.COLOR_BGR2RGB)
+input_image = torch.tensor(input_image / 255, dtype=torch.float32, device=device).permute(2, 0, 1)
 
-# Infer 
+# Infer
 output = model.infer(input_image)
 """
 `output` has keys "points", "depth", "mask", "normal" (optional) and "intrinsics",
-The maps are in the same size as the input image. 
+The maps are in the same size as the input image.
 {
     "points": (H, W, 3),    # point map in OpenCV camera coordinate system (x right, y down, z forward). For MoGe-2, the point map is in metric scale.
     "depth": (H, W),        # depth map
     "normal": (H, W, 3)     # normal map in OpenCV camera coordinate system. (available for MoGe-2-normal)
-    "mask": (H, W),         # a binary mask for valid pixels. 
+    "mask": (H, W),         # a binary mask for valid pixels.
     "intrinsics": (3, 3),   # normalized camera intrinsics
 }
 """
@@ -172,7 +175,7 @@ moge app        # will run MoGe-2 demo by default.
 python moge/scripts/app.py   # --share for Gradio public sharing
 ```
 
-See also [`moge/scripts/app.py`](moge/scripts/app.py) 
+See also [`moge/scripts/app.py`](moge/scripts/app.py)
 
 
 ### Inference | `moge infer`
@@ -238,12 +241,12 @@ Options:
 
 See also [`moge/scripts/infer.py`](moge/scripts/infer.py)
 
-### 360° panorama images | `moge infer_panorama` 
+### 360° panorama images | `moge infer_panorama`
 
 > *NOTE: This is an experimental extension of MoGe.*
 
-The script will split the 360-degree panorama image into multiple perspective views and infer on each view separately. 
-The output maps will be combined to produce a panorama depth map and point map. 
+The script will split the 360-degree panorama image into multiple perspective views and infer on each view separately.
+The output maps will be combined to produce a panorama depth map and point map.
 
 Note that the panorama image must have spherical parameterization (e.g., environment maps or equirectangular images). Other formats must be converted to spherical format before using this script. Run `moge infer_panorama --help` for detailed options.
 
@@ -266,7 +269,7 @@ See [docs/eval.md](docs/eval.md)
 
 ## ⚖️ License
 
-MoGe code is released under the MIT license, except for DINOv2 code in `moge/model/dinov2` which is released by Meta AI under the Apache 2.0 license. 
+MoGe code is released under the MIT license, except for DINOv2 code in `moge/model/dinov2` which is released by Meta AI under the Apache 2.0 license.
 See [LICENSE](LICENSE) for more details.
 
 
@@ -284,12 +287,12 @@ If you find our work useful in your research, we gratefully request that you con
 }
 
 @misc{wang2025moge2,
-      title={MoGe-2: Accurate Monocular Geometry with Metric Scale and Sharp Details}, 
+      title={MoGe-2: Accurate Monocular Geometry with Metric Scale and Sharp Details},
       author={Ruicheng Wang and Sicheng Xu and Yue Dong and Yu Deng and Jianfeng Xiang and Zelong Lv and Guangzhong Sun and Xin Tong and Jiaolong Yang},
       year={2025},
       eprint={2507.02546},
       archivePrefix={arXiv},
       primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2507.02546}, 
+      url={https://arxiv.org/abs/2507.02546},
 }
 ```
